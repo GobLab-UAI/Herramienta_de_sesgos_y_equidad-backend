@@ -44,10 +44,20 @@ DISPARITY_METRICS: List[str] = [
 # casi siempre da "Unfair", por eso NO se usa para la conclusión general.
 FAIRNESS_CONCLUSION_METRICS: List[str] = ["fpr", "fnr", "for", "fdr"]
 
-# Tamaño mínimo de subgrupo para que su disparidad sea estadísticamente fiable.
-# Los subgrupos por debajo de este umbral se marcan "muestra insuficiente" y NO
-# determinan la conclusión de equidad del atributo (siguen visibles en las tablas).
+# Mínimo de casos EVALUADOS para que una tasa de error sea fiable. Se mide sobre
+# el denominador de cada tasa (no sobre el tamaño del grupo): p. ej. la FNR de un
+# grupo de 61 filas con 19 positivos reales se calcula sobre 19 casos. Las tasas
+# por debajo del umbral se marcan "muestra insuficiente" y NO determinan la
+# conclusión de equidad (siguen visibles en las tablas).
 DEFAULT_MIN_GROUP_SIZE: int = 50
+
+# Denominador ("casos evaluados") de cada tasa de error del veredicto.
+EVALUATED_CASES_COL: Dict[str, str] = {
+    "fpr": "group_label_neg",  # negativos reales
+    "fnr": "group_label_pos",  # positivos reales
+    "fdr": "pp",               # casos que el modelo marcó como positivos
+    "for": "pn",               # casos que el modelo marcó como negativos
+}
 
 # Mapa disparidad -> nombre de columna de paridad Fair/Unfair (idéntico a Aequitas).
 PARITY_MAPPING: Dict[str, str] = {
@@ -368,13 +378,27 @@ def _apply_parity(
 
     Fair si la disparidad es NaN o cae en ``[1/tau, tau]``. Un valor infinito
     (numerador>0, denominador de referencia=0) queda fuera del rango -> Unfair.
-    Marca ``insufficient_sample`` para subgrupos con ``group_size < min_group_size``.
+
+    Muestra mínima por tasa: ``{m}_n_eval`` = casos evaluados (denominador de la
+    tasa) y ``{m}_insufficient`` = ``{m}_n_eval < min_group_size``. Una tasa
+    insuficiente no cuenta para la conclusión. ``insufficient_sample`` marca los
+    subgrupos en que TODAS las tasas del veredicto son insuficientes.
     """
     fairness_df = bias_df.copy()
     lower_bound = 1.0 / fairness_threshold
     upper_bound = fairness_threshold
 
-    if "group_size" in fairness_df.columns:
+    insufficient_cols = []
+    for m in FAIRNESS_CONCLUSION_METRICS:
+        den = EVALUATED_CASES_COL[m]
+        if den in fairness_df.columns:
+            n_eval = pd.to_numeric(fairness_df[den], errors="coerce")
+            fairness_df[f"{m}_n_eval"] = n_eval
+            fairness_df[f"{m}_insufficient"] = n_eval < min_group_size
+            insufficient_cols.append(f"{m}_insufficient")
+    if insufficient_cols:
+        fairness_df["insufficient_sample"] = fairness_df[insufficient_cols].all(axis=1)
+    elif "group_size" in fairness_df.columns:
         fairness_df["insufficient_sample"] = fairness_df["group_size"] < min_group_size
 
     for disparity_metric, parity_metric in PARITY_MAPPING.items():
@@ -384,16 +408,22 @@ def _apply_parity(
             )
 
     # La conclusión general del subgrupo se basa en las métricas de error
-    # (FPR/FNR/FOR/FDR): "Unfair" si CUALQUIERA de ellas supera la tolerancia.
-    conclusion_parities = [
-        PARITY_MAPPING[f"{m}_disparity"]
-        for m in FAIRNESS_CONCLUSION_METRICS
-        if f"{m}_disparity" in PARITY_MAPPING and PARITY_MAPPING[f"{m}_disparity"] in fairness_df.columns
+    # (FPR/FNR/FOR/FDR): "Unfair" si CUALQUIERA de ellas con muestra suficiente
+    # supera la tolerancia.
+    conclusion_metrics = [
+        m for m in FAIRNESS_CONCLUSION_METRICS
+        if PARITY_MAPPING.get(f"{m}_disparity") in fairness_df.columns
     ]
-    if conclusion_parities:
-        fairness_df["fairness_conclusion"] = fairness_df[conclusion_parities].apply(
-            lambda row: "Unfair" if (row == "Unfair").any() else "Fair", axis=1
-        )
+    if conclusion_metrics:
+        def _conclusion(row):
+            for m in conclusion_metrics:
+                flag = row.get(f"{m}_insufficient")
+                if flag is not None and not pd.isna(flag) and bool(flag):
+                    continue
+                if row[PARITY_MAPPING[f"{m}_disparity"]] == "Unfair":
+                    return "Unfair"
+            return "Fair"
+        fairness_df["fairness_conclusion"] = fairness_df.apply(_conclusion, axis=1)
     elif "Statistical Parity" in fairness_df.columns:
         fairness_df["fairness_conclusion"] = fairness_df["Statistical Parity"]
     return fairness_df
@@ -431,7 +461,12 @@ def get_group_attribute_fairness(fairness_df: pd.DataFrame) -> pd.DataFrame:
         reliable = _reliable_rows(group)
         row = {"attribute_name": attr}
         for col in parity_cols:
-            row[col] = "Unfair" if (reliable[col] == "Unfair").any() else "Fair"
+            rows_col = reliable
+            metric = next((d[:-len("_disparity")] for d, p in PARITY_MAPPING.items() if p == col), None)
+            flag = f"{metric}_insufficient"
+            if flag in reliable.columns:
+                rows_col = reliable[~reliable[flag].astype(bool)]
+            row[col] = "Unfair" if (rows_col[col] == "Unfair").any() else "Fair"
         if include_conclusion:
             row["fairness_conclusion"] = (
                 "Unfair" if (reliable["fairness_conclusion"] == "Unfair").any() else "Fair"

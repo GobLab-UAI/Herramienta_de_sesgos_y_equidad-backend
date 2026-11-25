@@ -8,7 +8,7 @@ se migrarán al frontend (Recharts) y este módulo podrá adelgazarse aún más.
 """
 import base64
 from io import BytesIO
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import matplotlib
 matplotlib.use("Agg")
@@ -65,17 +65,19 @@ def generate_distribution_plots(
     return plots
 
 
-def render_absolute_plot(group_metrics_df, metric: str, attribute: str) -> str:
+def render_absolute_plot(group_metrics_df, metric: str, attribute: str,
+                         class_label: Optional[str] = None) -> str:
     """Barras de una métrica absoluta por subgrupo, estilo Aequitas."""
     df = pd.DataFrame(group_metrics_df) if not isinstance(group_metrics_df, pd.DataFrame) else group_metrics_df
-    return render_group_metric_plot(df, metric, attribute)
+    return render_group_metric_plot(df, metric, attribute, class_label)
 
 
-def render_disparity_plot(bias_df, metrics: List[str], attribute: str) -> str:
+def render_disparity_plot(bias_df, metrics: List[str], attribute: str,
+                          class_label: Optional[str] = None) -> str:
     """Treemap de disparidad por atributo, estilo Aequitas. Usa la 1ª métrica."""
     df = pd.DataFrame(bias_df) if not isinstance(bias_df, pd.DataFrame) else bias_df
     metric = metrics[0] if isinstance(metrics, (list, tuple)) and metrics else metrics
-    return render_disparity_treemap(df, metric, attribute)
+    return render_disparity_treemap(df, metric, attribute, class_label)
 
 
 def run_full_analysis(

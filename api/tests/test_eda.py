@@ -79,8 +79,36 @@ def test_eda_enrichment(compas):
     assert by_name["race"]["role_hint"] == "protected"
     # sexo binario de texto -> protegida (no outcome)
     assert by_name["sex"]["role_hint"] == "protected"
-    # score numérico 0/1 -> outcome
-    assert by_name["score"]["role_hint"] == "outcome"
+    # score -> predicción; label_value -> valor real; entity_id -> identificador
+    assert by_name["score"]["role_hint"] == "prediction"
+    assert by_name["label_value"]["role_hint"] == "actual"
+    assert by_name["entity_id"]["role_hint"] == "id"
+
+
+def test_eda_actual_by_matching_values():
+    """Si solo la predicción tiene un nombre reconocible, el valor real es la
+    columna con los mismos valores."""
+    rng = np.random.RandomState(1)
+    df = pd.DataFrame({"prediccion": rng.randint(0, 2, 300),
+                       "reincidio": rng.randint(0, 2, 300),
+                       "sexo": rng.choice(["F", "M"], 300)})
+    roles = {c["name"]: c["role_hint"] for c in run_eda(df)["columns"]}
+    assert roles == {"prediccion": "prediction", "reincidio": "actual", "sexo": "protected"}
+
+
+def test_eda_no_proxy_alert_for_prediction_vs_actual():
+    """Que la predicción se parezca al valor real es lo esperado: sin alerta."""
+    rng = np.random.RandomState(2)
+    real = rng.randint(0, 2, 500)
+    df = pd.DataFrame({"score": real, "label_value": real,
+                       "sexo": rng.choice(["F", "M"], 500)})
+    proxy = [a for a in run_eda(df)["alerts"] if a["type"] == "proxy"]
+    assert not proxy
+
+
+def test_eda_small_group_counts_positives(compas):
+    msg = next(a["message"] for a in run_eda(compas)["alerts"] if a["type"] == "small_group")
+    assert "Asian (32 casos, 9 positivos)" in msg
 
 
 def test_eda_crosstabs(compas):

@@ -276,11 +276,41 @@ def test_min_group_size_ignores_tiny_group_in_verdict():
 
 def test_conclusion_based_on_error_metrics(compas):
     """fairness_conclusion = Unfair sii alguna paridad de error (FPR/FNR/FOR/FDR)
-    lo es; independiente de la Paridad Estadística (ppr)."""
+    con muestra suficiente lo es; independiente de la Paridad Estadística (ppr)."""
     res = mc.run_full_analysis(compas, PROTECTED, "score", "label_value",
                                "majority", {}, 1.25, "fpr")
     bm = res["tables"]["bias_metrics"]
-    error_parities = ["FPR Parity", "FNR Parity", "FOR Parity", "FDR Parity"]
+    error_metrics = ["fpr", "fnr", "for", "fdr"]
     for _, row in bm.iterrows():
-        expected = "Unfair" if any(row[p] == "Unfair" for p in error_parities) else "Fair"
+        expected = "Unfair" if any(
+            row[f"{m.upper()} Parity"] == "Unfair" and not row[f"{m}_insufficient"]
+            for m in error_metrics
+        ) else "Fair"
         assert row["fairness_conclusion"] == expected
+
+
+def test_min_sample_uses_evaluated_cases():
+    """La muestra mínima se mide sobre los casos evaluados de cada tasa: un grupo
+    de 80 filas con solo 10 positivos reales no usa su FNR en el veredicto."""
+    rows = []
+    for i in range(200):  # H: 100 neg (20 FP) + 100 pos (10 FN)
+        if i < 100:
+            rows.append({"g": "H", "score": 1 if i < 20 else 0, "label_value": 0})
+        else:
+            rows.append({"g": "H", "score": 0 if i < 110 else 1, "label_value": 1})
+    for i in range(70):   # M negativos: FPR igual a H (0.2)
+        rows.append({"g": "M", "score": 1 if i < 14 else 0, "label_value": 0})
+    for _ in range(10):   # M positivos: todos FN -> FNR = 1.0 (10x H), pero n=10
+        rows.append({"g": "M", "score": 0, "label_value": 1})
+    df = pd.DataFrame(rows)
+    res = mc.run_full_analysis(df, ["g"], "score", "label_value",
+                               "majority", {}, 1.25, "fpr", min_group_size=50)
+    bm = res["tables"]["bias_metrics"].set_index("attribute_value")
+    assert bm.loc["M", "fnr_n_eval"] == 10
+    assert bool(bm.loc["M", "fnr_insufficient"]) is True
+    assert bool(bm.loc["M", "fpr_insufficient"]) is False
+    assert not bool(bm.loc["M", "insufficient_sample"])  # 80 filas: el grupo sí se evalúa
+    assert bm.loc["M", "FNR Parity"] == "Unfair"          # la paridad sigue visible
+    # A nivel de atributo, la FNR de M (10 casos) no cuenta.
+    by_attr = mc.get_group_attribute_fairness(res["tables"]["bias_metrics"]).set_index("attribute_name")
+    assert by_attr.loc["g", "FNR Parity"] == "Fair"

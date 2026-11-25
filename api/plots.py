@@ -13,7 +13,7 @@ librería:
 import base64
 import math
 from io import BytesIO
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import matplotlib
 matplotlib.use("Agg")
@@ -64,10 +64,25 @@ def _metric_label(metric: str) -> str:
     return METRIC_LABELS.get(metric, metric.upper())
 
 
+def _metric_title(metric: str) -> str:
+    """Nombre de la métrica en minúscula de oración: 'Tasa de falsos positivos'."""
+    full = METRIC_FULL.get(metric, metric.upper()).lower()
+    return full[:1].upper() + full[1:]
+
+
+def _pct(x: float) -> str:
+    return f"{x * 100:.1f}%".replace(".", ",")
+
+
+def _class_suffix(class_label: Optional[str]) -> str:
+    return f" · Clase {class_label}" if class_label not in (None, "") else ""
+
+
 # ---------------------------------------------------------------------------
 # Gráfico de métricas absolutas (barras agrupadas por atributo)
 # ---------------------------------------------------------------------------
-def render_group_metric_plot(df: pd.DataFrame, metric: str, attribute: str) -> str:
+def render_group_metric_plot(df: pd.DataFrame, metric: str, attribute: str,
+                             class_label: Optional[str] = None) -> str:
     """Barras horizontales de `metric` por subgrupo, agrupadas por atributo."""
     if df is None or metric not in df.columns:
         return ""
@@ -103,8 +118,8 @@ def render_group_metric_plot(df: pd.DataFrame, metric: str, attribute: str) -> s
         val = float(row[metric]) if pd.notna(row[metric]) else 0.0
         color = _SIZE_CMAP(size_norm(row["group_size"])) if has_size else "#c98a3c"
         ax.barh(pos, val, height=0.8, color=color, edgecolor="white")
-        size_txt = f" (Num: {int(row['group_size']):,})" if has_size else ""
-        ax.text(val + 0.015, pos, f"{row['attribute_value']}{size_txt}, {val:.2f}",
+        size_txt = f" ({int(row['group_size']):,} casos)".replace(",", ".") if has_size else ""
+        ax.text(val + 0.015, pos, f"{row['attribute_value']}{size_txt}: {_pct(val)}",
                 va="center", ha="left", fontsize=9, color="#1f2937")
 
     # Etiquetas de atributo a la izquierda.
@@ -113,7 +128,7 @@ def render_group_metric_plot(df: pd.DataFrame, metric: str, attribute: str) -> s
     ax.invert_yaxis()
     ax.set_xlim(0, 1.0)
     ax.set_xlabel("Magnitud Absoluta de la Métrica", fontsize=10)
-    ax.set_title(f"{_metric_label(metric)} (Modelo 0)", fontsize=13, pad=12)
+    ax.set_title(f"{_metric_title(metric)} por grupo{_class_suffix(class_label)}", fontsize=13, pad=12)
     ax.grid(axis="x", linestyle="--", alpha=0.4)
     ax.set_axisbelow(True)
     for spine in ("top", "right"):
@@ -181,7 +196,8 @@ def _layout_row(row, x, y, dx, dy, out):
         return x, y + h, dx, dy - h
 
 
-def render_disparity_treemap(df: pd.DataFrame, metric: str, attribute: str) -> str:
+def render_disparity_treemap(df: pd.DataFrame, metric: str, attribute: str,
+                             class_label: Optional[str] = None) -> str:
     """Cuadrícula de treemaps de disparidad, uno por atributo protegido."""
     if isinstance(metric, (list, tuple)):
         metric = metric[0] if metric else "fpr_disparity"
@@ -232,7 +248,7 @@ def render_disparity_treemap(df: pd.DataFrame, metric: str, attribute: str) -> s
         ax.set_ylim(0, 100)
         ax.set_xticks([])
         ax.set_yticks([])
-        ax.set_title(f"{_metric_label(base)} DISPARITY: {str(attr).upper()}", fontsize=10)
+        ax.set_title(f"Disparidad en {_metric_label(base)} · {attr}{_class_suffix(class_label)}", fontsize=10)
         fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=_DISPARITY_CMAP),
                      ax=ax, fraction=0.046, pad=0.04)
 

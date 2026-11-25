@@ -202,7 +202,7 @@ async def rerender_plot_endpoint(payload: Dict):
         # Usamos el primer atributo de la lista (o 'all' si está vacía)
         attribute_to_plot = attributes[0] if attributes else 'all'
         
-        plot_base64 = render_disparity_plot(bias_df, metrics, attribute_to_plot)
+        plot_base64 = render_disparity_plot(bias_df, metrics, attribute_to_plot, payload.get('class_label'))
         return JSONResponse(content={"plot": plot_base64})
     except Exception as e:
         import traceback
@@ -215,7 +215,7 @@ async def absolute_plot_endpoint(payload: Dict):
         group_metrics_df = pd.DataFrame(payload.get('group_metrics_for_plotting'))
         metric = payload.get('metric')
         attribute = payload.get('attribute')
-        plot_base64 = render_absolute_plot(group_metrics_df, metric, attribute)
+        plot_base64 = render_absolute_plot(group_metrics_df, metric, attribute, payload.get('class_label'))
         return JSONResponse(content={"plot": plot_base64})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -229,7 +229,7 @@ async def group_metric_plot_endpoint(payload: Dict):
         attribute = payload.get('attribute')
         
         # Reutilizamos la función de ploteo existente que hace lo que necesitamos
-        plot_base64 = render_absolute_plot(group_metrics_df, metric, attribute)
+        plot_base64 = render_absolute_plot(group_metrics_df, metric, attribute, payload.get('class_label'))
         
         return JSONResponse(content={"plot": plot_base64})
     except Exception as e:

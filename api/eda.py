@@ -89,23 +89,96 @@ def _histogram(series: pd.Series) -> List[Dict]:
     ]
 
 
-def _role_hint(name: str, dtype: str, n_unique: int, n_rows: int, is_numeric: bool) -> str:
-    """Sugerencia heurística del rol de la columna (predicción/etiqueta, protegida,
-    identificador o feature). Es solo una pista; el usuario decide."""
-    lname = str(name).lower()
-    if n_rows and n_unique / n_rows > 0.5 and n_unique > 20:
-        return "id"
-    if any(k in lname for k in ("score", "pred", "prob", "riesgo", "resultado")):
-        return "outcome"
-    if any(k in lname for k in ("label", "target", "real", "clase", "y_true", "outcome")):
-        return "outcome"
-    # Una binaria numérica {0,1} suele ser predicción/etiqueta; una binaria de
-    # texto (p. ej. sexo Male/Female) suele ser una variable protegida.
-    if dtype == "binary":
-        return "outcome" if is_numeric else "protected"
-    if dtype == "categorical":
-        return "protected"
-    return "feature"
+_PRED_KEYS = ("pred", "score", "prob", "riesgo", "resultado", "yhat", "y_hat")
+_ACTUAL_KEYS = ("real", "label", "target", "y_true", "ytrue", "actual", "verdad", "observ",
+                "etiqueta", "outcome", "clase")
+
+# Roles posibles: "id" (identificador), "prediction" (predicción del modelo),
+# "actual" (valor real), "protected" (variable protegida) y "unused" (sin uso).
+# "outcome" queda solo cuando hay predicción/valor real indistinguibles por nombre.
+
+
+def _is_id(n_unique: int, n_rows: int) -> bool:
+    return bool(n_rows) and n_unique / n_rows > 0.5 and n_unique > 20
+
+
+def _value_set(series: pd.Series) -> frozenset:
+    return frozenset(str(v) for v in series.dropna().unique())
+
+
+def _assign_roles(df: pd.DataFrame, columns: List[Dict], n_rows: int) -> None:
+    """Asigna ``role_hint`` a cada columna (heurística; el usuario decide).
+
+    1. Identificador: casi un valor distinto por fila.
+    2. Predicción / valor real: por nombre de la columna. Si solo se reconoce una,
+       la otra es la columna (no protegida) con el mismo conjunto de valores.
+    3. Variable protegida: categórica, o binaria de texto (p. ej. sexo).
+    4. Sin uso: el resto (p. ej. numéricas continuas).
+    """
+    by_name = {c["name"]: c for c in columns}
+    for c in columns:
+        c["role_hint"] = "id" if _is_id(c["unique"], n_rows) else None
+
+    def free(c):
+        return c["role_hint"] is None and 2 <= c["unique"] <= MAX_CATEGORIES_FOR_ASSOC
+
+    def first_with(keys, exclude=None):
+        for c in columns:
+            if free(c) and c["name"] != exclude and any(k in c["name"].lower() for k in keys):
+                return c["name"]
+        return None
+
+    pred = first_with(_PRED_KEYS)
+    actual = first_with(_ACTUAL_KEYS, exclude=pred)
+    if bool(pred) != bool(actual):
+        known = pred or actual
+        known_set = _value_set(df[known])
+        for c in columns:
+            if free(c) and c["name"] != known and _value_set(df[c["name"]]) == known_set:
+                if pred:
+                    actual = c["name"]
+                else:
+                    pred = c["name"]
+                break
+    if pred:
+        by_name[pred]["role_hint"] = "prediction"
+    if actual:
+        by_name[actual]["role_hint"] = "actual"
+
+    for c in columns:
+        if c["role_hint"] is not None:
+            continue
+        numeric = _is_numeric(df[c["name"]])
+        if c["dtype"] == "categorical" or (c["dtype"] == "binary" and not numeric):
+            c["role_hint"] = "protected"
+        elif c["dtype"] == "binary" and not (pred and actual):
+            # Binaria numérica {0,1} sin nombre reconocible: predicción o valor real.
+            c["role_hint"] = "outcome"
+        else:
+            c["role_hint"] = "unused"
+
+
+def _fmt_int(n: int) -> str:
+    """Entero con punto de miles (es-CL): 7000 -> '7.000'."""
+    return f"{int(n):,}".replace(",", ".")
+
+
+def _fmt_dec(x: float, digits: int = 2) -> str:
+    return f"{x:.{digits}f}".replace(".", ",")
+
+
+def _join_es(items: List[str]) -> str:
+    if len(items) <= 1:
+        return "".join(items)
+    return ", ".join(items[:-1]) + " y " + items[-1]
+
+
+def _positive_value(series: pd.Series):
+    """Valor positivo de la columna de valor real si es binaria {0,1}; si no, None."""
+    vals = set(pd.to_numeric(series.dropna(), errors="coerce").dropna().unique())
+    if vals and vals <= {0.0, 1.0} and series.dropna().nunique() <= 2:
+        return 1.0
+    return None
 
 
 def _capped_categories(series: pd.Series, cap: int = MAX_CATEGORIES_FOR_CROSSTAB) -> List[str]:
@@ -171,7 +244,6 @@ def run_eda(df: pd.DataFrame, min_group_size: int = 50) -> Dict:
         # ¿Apta para la matriz de asociación / como variable categórica?
         categorical_like = 2 <= n_unique <= MAX_CATEGORIES_FOR_ASSOC
         col["categorical_like"] = categorical_like
-        col["role_hint"] = _role_hint(name, dtype, n_unique, n_rows, _is_numeric(series))
 
         # Índice de balance (evenness) para variables categóricas.
         if categorical_like:
@@ -193,24 +265,56 @@ def run_eda(df: pd.DataFrame, min_group_size: int = 50) -> Dict:
         if n_unique <= 1:
             alerts.append({"level": "warning", "type": "constant", "columns": [str(name)],
                            "message": f"'{name}' es constante (un solo valor); no aporta al análisis."})
-        elif n_rows and n_unique / n_rows > 0.5 and n_unique > 20:
-            alerts.append({"level": "info", "type": "high_cardinality", "columns": [str(name)],
-                           "message": f"'{name}' tiene cardinalidad muy alta ({n_unique} valores); "
-                                      f"probablemente sea un identificador y no una variable protegida."})
-
         if categorical_like and col["top_values"]:
             top = col["top_values"][0]
             if top["pct"] >= 90:
                 alerts.append({"level": "warning", "type": "imbalance", "columns": [str(name)],
                                "message": f"'{name}' está muy desbalanceada: '{top['value']}' concentra "
                                           f"el {top['pct']:.0f}% de los casos."})
-            small = [tv for tv in col["top_values"]
-                     if not tv.get("is_aggregate") and tv["count"] < min_group_size]
-            if small:
-                grupos = ", ".join(f"{tv['value']} (n={tv['count']})" for tv in small[:5])
-                alerts.append({"level": "warning", "type": "small_group", "columns": [str(name)],
-                               "message": f"'{name}' tiene subgrupos con muestra pequeña (<{min_group_size}): "
-                                          f"{grupos}. Sus métricas serán poco fiables."})
+
+    # --- Roles sugeridos (necesitan ver todas las columnas) ---
+    _assign_roles(df, columns, n_rows)
+    roles = {c["name"]: c["role_hint"] for c in columns}
+    actual_col = next((n for n, r in roles.items() if r == "actual"), None)
+    pos_value = _positive_value(df[actual_col]) if actual_col else None
+
+    for col in columns:
+        name = col["name"]
+        if roles[name] == "id":
+            if col["unique"] == n_rows:
+                msg = (f"'{name}' tiene un valor distinto en cada fila ({_fmt_int(n_rows)}). "
+                       f"Parece un identificador: no la uses como variable protegida.")
+            else:
+                msg = (f"'{name}' tiene {_fmt_int(col['unique'])} valores distintos en "
+                       f"{_fmt_int(n_rows)} filas. Parece un identificador: no la uses como "
+                       f"variable protegida.")
+            alerts.append({"level": "info", "type": "high_cardinality", "columns": [name],
+                           "message": msg})
+
+        # Grupos con pocos casos: solo en columnas que podrían ser variables protegidas.
+        if roles[name] not in ("protected", "unused") or not col["categorical_like"]:
+            continue
+        sub = df[[name]].copy()
+        if pos_value is not None:
+            sub["_pos"] = pd.to_numeric(df[actual_col], errors="coerce") == pos_value
+        small = []
+        for tv in col["top_values"]:
+            if tv.get("is_aggregate"):
+                continue
+            n = tv["count"]
+            npos = None
+            if pos_value is not None:
+                mask = sub[name].astype(str) == str(tv["value"])
+                npos = int(sub.loc[mask, "_pos"].sum())
+            if n < min_group_size or (npos is not None and min(npos, n - npos) < min_group_size):
+                txt = f"{tv['value']} ({_fmt_int(n)} casos"
+                txt += f", {_fmt_int(npos)} positivos)" if npos is not None else ")"
+                small.append(txt)
+        if small:
+            alerts.append({"level": "warning", "type": "small_group", "columns": [name],
+                           "message": f"{name} tiene grupos con pocos casos: {_join_es(small[:5])}. "
+                                      f"Sus resultados serán poco confiables: las tasas que se calculen "
+                                      f"sobre menos de {min_group_size} casos no se usarán en el veredicto."})
 
     # --- Matriz de asociación (Cramér's V) entre columnas categórico-like ---
     matrix: List[List[float]] = []
@@ -228,15 +332,27 @@ def run_eda(df: pd.DataFrame, min_group_size: int = 50) -> Dict:
             matrix.append(row)
 
         # Alertas de posible proxy (asociación fuerte entre dos variables).
+        # Solo entre una variable protegida y otra columna: que la predicción se
+        # parezca al valor real es lo esperado (el modelo acierta).
         for i in range(len(assoc_cols)):
             for j in range(i + 1, len(assoc_cols)):
                 v = matrix[i][j]
-                if v >= 0.5:
-                    level = "warning" if v >= 0.7 else "info"
-                    alerts.append({"level": level, "type": "proxy",
-                                   "columns": [assoc_cols[i], assoc_cols[j]],
-                                   "message": f"'{assoc_cols[i]}' y '{assoc_cols[j]}' están fuertemente "
-                                              f"asociadas (V={v:.2f}); una podría ser proxy de la otra."})
+                a, b = assoc_cols[i], assoc_cols[j]
+                ra, rb = roles.get(a), roles.get(b)
+                if v < 0.5 or "protected" not in (ra, rb):
+                    continue
+                if {ra, rb} & {"prediction", "actual", "outcome", "id"}:
+                    continue
+                level = "warning" if v >= 0.7 else "info"
+                if ra == "protected" and rb == "protected":
+                    detalle = "Una podría reemplazar a la otra de forma indirecta (proxy) y esconder discriminación."
+                else:
+                    prot, otra = (a, b) if ra == "protected" else (b, a)
+                    detalle = (f"'{otra}' podría reemplazar a '{prot}' de forma indirecta (proxy) "
+                               f"y esconder discriminación.")
+                alerts.append({"level": level, "type": "proxy", "columns": [a, b],
+                               "message": f"'{a}' y '{b}' están muy relacionadas (V de Cramér = "
+                                          f"{_fmt_dec(v)}). {detalle}"})
 
     # --- Tablas de contingencia precomputadas (bivariado / sesgo / intersección) ---
     # Solo columnas categórico-like con pocas categorías, para acotar el tamaño.
