@@ -49,7 +49,52 @@ def test_detect_task_binary(binary_df):
 def test_detect_task_two_nonbinary_classes():
     s = pd.Series(["si", "no", "si", "no"])
     task, classes = mc._detect_task(s, s)
-    assert task == "multiclass"  # 2 clases no {0,1} -> OvR
+    assert task == "binary"  # 2 valores de texto -> binario (sin clase espejo)
+
+
+def test_binary_text_uses_chosen_positive_class():
+    """Binario con texto (Alto / No alto): la clase positiva elegida define las tasas."""
+    rng = np.random.RandomState(3)
+    n = 400
+    df = pd.DataFrame({
+        "g": rng.choice(["A", "B"], n),
+        "pred": rng.choice(["Alto", "No alto"], n),
+        "real": rng.choice(["Alto", "No alto"], n),
+    })
+    res = mc.run_full_analysis(df, ["g"], "pred", "real", "majority", {}, 1.25,
+                               "fpr", positive_class="Alto")
+    assert res["metadata"]["task_type"] == "binary"
+    assert res["metadata"]["positive_class"] == "Alto"
+    assert "by_class" not in res
+    # Debe coincidir con binarizar a mano (Alto = 1).
+    manual = pd.DataFrame({"g": df["g"], "pred": (df["pred"] == "Alto").astype(int),
+                           "real": (df["real"] == "Alto").astype(int)})
+    ref = mc.run_full_analysis(manual, ["g"], "pred", "real", "majority", {}, 1.25, "fpr")
+    a = res["tables"]["group_metrics"].set_index("attribute_value")["fpr"]
+    b = ref["tables"]["group_metrics"].set_index("attribute_value")["fpr"]
+    pd.testing.assert_series_equal(a, b)
+
+
+def test_binary_01_positive_class_zero_inverts():
+    rng = np.random.RandomState(4)
+    n = 400
+    df = pd.DataFrame({"g": rng.choice(["A", "B"], n),
+                       "pred": rng.randint(0, 2, n), "real": rng.randint(0, 2, n)})
+    one = mc.run_full_analysis(df, ["g"], "pred", "real", "majority", {}, 1.25, "fpr")
+    zero = mc.run_full_analysis(df, ["g"], "pred", "real", "majority", {}, 1.25, "fpr",
+                                positive_class="0")
+    assert one["metadata"]["positive_class"] == "1"
+    assert zero["metadata"]["positive_class"] == "0"
+    # Con 0 como positiva, la FPR pasa a ser la FNR original.
+    a = zero["tables"]["group_metrics"].set_index("attribute_value")["fpr"]
+    b = one["tables"]["group_metrics"].set_index("attribute_value")["fnr"]
+    pd.testing.assert_series_equal(a, b, check_names=False)
+
+
+def test_multiclass_focus_class(multiclass_df):
+    res = mc.run_full_analysis(multiclass_df, ["genero"], "score", "label_value",
+                               "majority", {}, 1.25, "fpr", positive_class="B")
+    assert res["metadata"]["focus_class"] == "B"
 
 
 # ---------------------------------------------------------------------------

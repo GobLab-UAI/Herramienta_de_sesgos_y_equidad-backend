@@ -90,6 +90,7 @@ def run_full_analysis(
     fairness_threshold: float,
     performance_metric: str = "fpr",
     min_group_size: int = 50,
+    positive_class=None,
 ) -> Dict:
     """Orquesta el cálculo (metrics_core) y añade las visualizaciones."""
     results = _run_metrics(
@@ -102,6 +103,7 @@ def run_full_analysis(
         fairness_threshold=fairness_threshold,
         min_group_size=min_group_size,
         performance_metric=performance_metric,
+        positive_class=positive_class,
     )
 
     results["distribution_plots"] = generate_distribution_plots(

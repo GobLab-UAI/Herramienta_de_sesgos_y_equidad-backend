@@ -481,17 +481,33 @@ def get_group_attribute_fairness(fairness_df: pd.DataFrame) -> pd.DataFrame:
 def _detect_task(label_series: pd.Series, score_series: pd.Series):
     """Devuelve ``('binary'|'multiclass', classes)``.
 
-    Binario si hay como máximo 2 clases y son numéricas {0, 1}; en caso contrario
-    (más de 2 clases, o 2 clases no {0,1}) se trata como multiclase one-vs-rest.
+    Binario si hay como máximo 2 valores (p. ej. {0, 1} o {Alto, No alto}); con
+    más de 2 se trata como multiclase one-vs-rest.
     """
     vals = pd.concat([label_series, score_series]).dropna()
     classes = sorted(pd.unique(vals), key=lambda x: str(x))
-    coerced = pd.to_numeric(vals, errors="coerce")
-    all_numeric = bool(coerced.notna().all())
-    numeric_vals = set(coerced.dropna().unique())
-    if len(classes) <= 2 and all_numeric and numeric_vals <= {0.0, 1.0}:
+    if len(classes) <= 2:
         return "binary", classes
     return "multiclass", classes
+
+
+def _is_01(classes) -> bool:
+    coerced = pd.to_numeric(pd.Series(classes), errors="coerce")
+    return bool(coerced.notna().all()) and set(coerced.unique()) <= {0.0, 1.0}
+
+
+def _default_positive(classes):
+    """Clase positiva por defecto en binario: 1 si es {0,1}; si no, la primera."""
+    if _is_01(classes):
+        return next((c for c in classes if float(c) == 1.0), classes[-1])
+    return classes[0] if classes else None
+
+
+def _match_class(classes, value):
+    """Busca ``value`` (que llega como texto desde la UI) entre las clases."""
+    if value is None:
+        return None
+    return next((c for c in classes if str(c) == str(value)), None)
 
 
 def _binarize_ovr(df_local: pd.DataFrame, positive_class) -> pd.DataFrame:
@@ -563,8 +579,13 @@ def run_full_analysis(
     fairness_threshold: float,
     performance_metric: str = "fpr",
     min_group_size: int = DEFAULT_MIN_GROUP_SIZE,
+    positive_class=None,
 ) -> Dict:
     """Ejecuta el análisis completo (binario o multiclase) y devuelve las tablas.
+
+    ``positive_class``: en binario, el valor con que el modelo marca a una persona
+    (las tasas de error se calculan respecto de él); en multiclase, la clase más
+    importante para la decisión (se informa en ``metadata.focus_class``).
 
     - **Binario** ({0,1}): estructura idéntica a la de Aequitas (sin cambios para
       el frontend).
@@ -589,8 +610,18 @@ def run_full_analysis(
     df_local = df[protected_attributes].copy()
 
     if task_type == "binary":
-        df_local["score"] = pd.to_numeric(df[score_col], errors="coerce")
-        df_local["label_value"] = pd.to_numeric(df[label_col], errors="coerce")
+        positive = _match_class(classes, positive_class)
+        if positive is None:
+            positive = _default_positive(classes)
+        metadata["classes"] = [str(c) for c in classes]
+        metadata["positive_class"] = str(positive) if positive is not None else None
+        if _is_01(classes) and positive is not None and float(positive) == 1.0:
+            df_local["score"] = pd.to_numeric(df[score_col], errors="coerce")
+            df_local["label_value"] = pd.to_numeric(df[label_col], errors="coerce")
+        else:
+            df_local["score"] = df[score_col].values
+            df_local["label_value"] = df[label_col].values
+            df_local = _binarize_ovr(df_local, positive)
         tables = _run_binary_tables(df_local, protected_attributes, ref_method,
                                     ref_groups, fairness_threshold, performance_metric,
                                     min_group_size)
@@ -618,6 +649,8 @@ def run_full_analysis(
 
     tables = {k: pd.concat(concat[k], ignore_index=True) for k in table_keys}
     metadata["classes"] = [str(c) for c in classes]
+    focus = _match_class(classes, positive_class)
+    metadata["focus_class"] = str(focus) if focus is not None else None
 
     return {
         "distribution_plots": {},
