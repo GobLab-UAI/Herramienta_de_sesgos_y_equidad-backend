@@ -369,12 +369,23 @@ def _chi2_significant(row, ref_row, pos_c, neg_c, alpha):
 # ---------------------------------------------------------------------------
 # 3. Fairness(): paridades Fair/Unfair
 # ---------------------------------------------------------------------------
+def _verdict_metrics(main_metric: Optional[str]) -> List[str]:
+    """Tasas que deciden el veredicto: la principal si es válida, o las cuatro."""
+    if main_metric in FAIRNESS_CONCLUSION_METRICS:
+        return [main_metric]
+    return list(FAIRNESS_CONCLUSION_METRICS)
+
+
 def _apply_parity(
     bias_df: pd.DataFrame,
     fairness_threshold: float,
     min_group_size: int = DEFAULT_MIN_GROUP_SIZE,
+    main_metric: Optional[str] = None,
 ) -> pd.DataFrame:
     """Añade columnas de paridad Fair/Unfair y ``fairness_conclusion``.
+
+    ``main_metric`` (fpr/fnr/for/fdr): si se indica, la conclusión usa SOLO esa
+    tasa (la métrica principal elegida en la guía); si no, las cuatro.
 
     Fair si la disparidad es NaN o cae en ``[1/tau, tau]``. Un valor infinito
     (numerador>0, denominador de referencia=0) queda fuera del rango -> Unfair.
@@ -388,6 +399,7 @@ def _apply_parity(
     lower_bound = 1.0 / fairness_threshold
     upper_bound = fairness_threshold
 
+    verdict_metrics = _verdict_metrics(main_metric)
     insufficient_cols = []
     for m in FAIRNESS_CONCLUSION_METRICS:
         den = EVALUATED_CASES_COL[m]
@@ -395,7 +407,8 @@ def _apply_parity(
             n_eval = pd.to_numeric(fairness_df[den], errors="coerce")
             fairness_df[f"{m}_n_eval"] = n_eval
             fairness_df[f"{m}_insufficient"] = n_eval < min_group_size
-            insufficient_cols.append(f"{m}_insufficient")
+            if m in verdict_metrics:
+                insufficient_cols.append(f"{m}_insufficient")
     if insufficient_cols:
         fairness_df["insufficient_sample"] = fairness_df[insufficient_cols].all(axis=1)
     elif "group_size" in fairness_df.columns:
@@ -411,7 +424,7 @@ def _apply_parity(
     # (FPR/FNR/FOR/FDR): "Unfair" si CUALQUIERA de ellas con muestra suficiente
     # supera la tolerancia.
     conclusion_metrics = [
-        m for m in FAIRNESS_CONCLUSION_METRICS
+        m for m in verdict_metrics
         if PARITY_MAPPING.get(f"{m}_disparity") in fairness_df.columns
     ]
     if conclusion_metrics:
@@ -526,6 +539,7 @@ def _run_binary_tables(
     fairness_threshold: float,
     performance_metric: str,
     min_group_size: int = DEFAULT_MIN_GROUP_SIZE,
+    main_metric: Optional[str] = None,
 ) -> Dict[str, pd.DataFrame]:
     """Núcleo de cálculo binario. Devuelve el dict de tablas del contrato."""
     xtab, absolute_metrics = get_crosstabs(df_local, protected_attributes)
@@ -543,7 +557,7 @@ def _run_binary_tables(
         ref_map = _reference_rows(xtab, ref_method, ref_groups, performance_metric)
         bias_df = get_disparity(xtab, ref_map, mask_significance=True)
 
-    fairness_df = _apply_parity(bias_df, fairness_threshold, min_group_size)
+    fairness_df = _apply_parity(bias_df, fairness_threshold, min_group_size, main_metric)
     return {
         "group_counts": group_counts_df,
         "group_metrics": group_metrics_df,
@@ -580,6 +594,7 @@ def run_full_analysis(
     performance_metric: str = "fpr",
     min_group_size: int = DEFAULT_MIN_GROUP_SIZE,
     positive_class=None,
+    main_metric: Optional[str] = None,
 ) -> Dict:
     """Ejecuta el análisis completo (binario o multiclase) y devuelve las tablas.
 
@@ -604,6 +619,8 @@ def run_full_analysis(
         "task_type": task_type,
         # Método de selección del grupo de referencia (para mostrarlo en la UI y el PDF).
         "ref_method": ref_method,
+        # Métrica principal del veredicto (None = las cuatro tasas de error).
+        "main_metric": main_metric if main_metric in FAIRNESS_CONCLUSION_METRICS else None,
         "performance_metric": performance_metric,
     }
 
@@ -624,7 +641,7 @@ def run_full_analysis(
             df_local = _binarize_ovr(df_local, positive)
         tables = _run_binary_tables(df_local, protected_attributes, ref_method,
                                     ref_groups, fairness_threshold, performance_metric,
-                                    min_group_size)
+                                    min_group_size, main_metric)
         return {"distribution_plots": {}, "plots": {}, "tables": tables, "metadata": metadata}
 
     # --- Multiclase (one-vs-rest) ---
@@ -640,7 +657,7 @@ def run_full_analysis(
         bin_df = _binarize_ovr(df_local, c)
         t = _run_binary_tables(bin_df, protected_attributes, ref_method,
                                ref_groups, fairness_threshold, performance_metric,
-                               min_group_size)
+                               min_group_size, main_metric)
         by_class[str(c)] = {"tables": t, "plots": {}}
         for k, tbl in t.items():
             tagged = tbl.copy()

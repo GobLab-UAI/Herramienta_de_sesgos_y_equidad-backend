@@ -166,6 +166,7 @@ async def full_analysis(file: UploadFile = Form(...), columns: str = Form(...), 
             min_group_size=int(analysis_params.get("minGroupSize",
                                                    analysis_params.get("min_group_size", 50))),
             positive_class=analysis_params.get("positiveClass"),
+            main_metric=analysis_params.get("mainMetric"),
         )
         response = {
             "distribution_plots": analysis_results["distribution_plots"],

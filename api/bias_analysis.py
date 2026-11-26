@@ -91,6 +91,7 @@ def run_full_analysis(
     performance_metric: str = "fpr",
     min_group_size: int = 50,
     positive_class=None,
+    main_metric=None,
 ) -> Dict:
     """Orquesta el cálculo (metrics_core) y añade las visualizaciones."""
     results = _run_metrics(
@@ -104,6 +105,7 @@ def run_full_analysis(
         min_group_size=min_group_size,
         performance_metric=performance_metric,
         positive_class=positive_class,
+        main_metric=main_metric,
     )
 
     results["distribution_plots"] = generate_distribution_plots(

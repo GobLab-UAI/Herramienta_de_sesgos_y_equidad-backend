@@ -314,3 +314,18 @@ def test_min_sample_uses_evaluated_cases():
     # A nivel de atributo, la FNR de M (10 casos) no cuenta.
     by_attr = mc.get_group_attribute_fairness(res["tables"]["bias_metrics"]).set_index("attribute_name")
     assert by_attr.loc["g", "FNR Parity"] == "Fair"
+
+
+def test_main_metric_decides_verdict(compas):
+    """Con métrica principal, la conclusión usa solo esa tasa (con muestra suficiente)."""
+    res = mc.run_full_analysis(compas, PROTECTED, "score", "label_value",
+                               "majority", {}, 1.25, "fpr", main_metric="fpr")
+    bm = res["tables"]["bias_metrics"]
+    assert res["metadata"]["main_metric"] == "fpr"
+    for _, row in bm.iterrows():
+        expected = "Unfair" if (row["FPR Parity"] == "Unfair" and not row["fpr_insufficient"]) else "Fair"
+        assert row["fairness_conclusion"] == expected
+    # Una métrica no válida vuelve a las cuatro tasas.
+    res2 = mc.run_full_analysis(compas, PROTECTED, "score", "label_value",
+                                "majority", {}, 1.25, "fpr", main_metric="ppr")
+    assert res2["metadata"]["main_metric"] is None
